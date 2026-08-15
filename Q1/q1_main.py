@@ -86,6 +86,7 @@ class Q1Model:
         )
 
         self.cylinder_surface_points = self._build_cylinder_surface_points()
+        self.cylinder_rim_points = self._build_cylinder_rim_points()
 
     # ------------------------------------------------------------------
     # 主体一：来袭导弹 M1
@@ -178,6 +179,36 @@ class Q1Model:
 
         return np.vstack([side_points, *cap_points])
 
+    def _build_cylinder_rim_points(self) -> np.ndarray:
+        """生成圆柱上、下边缘圆周的规则采样点。
+
+        在导弹位于烟幕球外且遮挡关系可表示为实心凸锥时，
+        两条边缘圆周均被遮挡蕴含整个圆柱被遮挡。本点集用于
+        验证这一降维判据，并为后续问题提供快速评价模式。
+        """
+
+        angles = np.linspace(
+            0.0,
+            2.0 * np.pi,
+            self.p.angle_count,
+            endpoint=False,
+        )
+        x0, y0, z0 = self.target_point
+        radius = self.p.target_radius
+
+        return np.vstack(
+            [
+                np.column_stack(
+                    (
+                        x0 + radius * np.cos(angles),
+                        y0 + radius * np.sin(angles),
+                        np.full_like(angles, height),
+                    )
+                )
+                for height in (z0, z0 + self.p.target_height)
+            ]
+        )
+
     # ------------------------------------------------------------------
     # 主体间关系：导弹视线段与烟幕球的相交判定
     # ------------------------------------------------------------------
@@ -215,6 +246,17 @@ class Q1Model:
             self.cloud_center(time),
             self.missile_position(time),
             self.cylinder_surface_points,
+        )
+        worst_distance = float(np.max(distances))
+        return self.p.cloud_radius - worst_distance
+
+    def cylinder_rim_margin(self, time: float) -> float:
+        """双圆周降维模型的遮蔽裕量；非负表示两条边缘圆周均被遮挡。"""
+
+        distances = self._distances_to_sight_segments(
+            self.cloud_center(time),
+            self.missile_position(time),
+            self.cylinder_rim_points,
         )
         worst_distance = float(np.max(distances))
         return self.p.cloud_radius - worst_distance
@@ -379,6 +421,7 @@ def save_results_csv(
     model: Q1Model,
     point_intervals: list[tuple[float, float]],
     cylinder_intervals: list[tuple[float, float]],
+    rim_intervals: list[tuple[float, float]],
 ) -> Path:
     """将论文需要的关键结果保存为 Excel 可直接打开的 CSV 表。"""
 
@@ -415,6 +458,12 @@ def save_results_csv(
             cylinder_intervals,
             "是",
             "第一问最终严格结果",
+        ),
+        (
+            "上下边缘双圆周遮蔽",
+            rim_intervals,
+            "否",
+            "凸锥降维判据与后续快速评价器验证",
         ),
     ]
 
@@ -877,12 +926,16 @@ def main() -> None:
         f"[{model.valid_start:.4f}, {model.valid_end:.4f}] s"
     )
     print(f"完整圆柱表面采样点数: {len(model.cylinder_surface_points)}")
+    print(f"上下边缘圆周采样点数: {len(model.cylinder_rim_points)}")
 
     point_intervals = model.find_effective_intervals(model.point_target_margin)
     print_intervals("一、点目标简化模型", point_intervals)
 
     cylinder_intervals = model.find_effective_intervals(model.cylinder_target_margin)
     print_intervals("二、完整圆柱严格遮蔽模型", cylinder_intervals)
+
+    rim_intervals = model.find_effective_intervals(model.cylinder_rim_margin)
+    print_intervals("三、上下边缘双圆周降维模型", rim_intervals)
 
     if not cylinder_intervals:
         raise RuntimeError("完整圆柱模型未得到有效遮蔽区间，无法分析临界状态。")
@@ -895,11 +948,14 @@ def main() -> None:
 
     point_duration = model.total_duration(point_intervals)
     cylinder_duration = model.total_duration(cylinder_intervals)
+    rim_duration = model.total_duration(rim_intervals)
 
     print("\n三、结果汇总")
     print(f"  点目标基础结果:       {point_duration:.4f} s")
     print(f"  完整圆柱严格结果:     {cylinder_duration:.4f} s")
+    print(f"  双圆周降维结果:       {rim_duration:.4f} s")
     print(f"  两种口径的时长差:     {point_duration - cylinder_duration:.4f} s")
+    print(f"  表面与双圆周差:       {cylinder_duration - rim_duration:.10f} s")
     print(f"  第一问最终建议取值:   {cylinder_duration:.2f} s")
 
     print("\n四、有效遮蔽区间临界状态")
@@ -914,7 +970,12 @@ def main() -> None:
         print(f"    点位说明: {state.worst_point_note}")
         print(f"    几何解释: {state.mechanism}")
 
-    result_path = save_results_csv(model, point_intervals, cylinder_intervals)
+    result_path = save_results_csv(
+        model,
+        point_intervals,
+        cylinder_intervals,
+        rim_intervals,
+    )
     critical_table_path = save_critical_states_csv(critical_states)
     figure_png_path = plot_critical_state_figure(
         model,
