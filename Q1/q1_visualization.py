@@ -35,6 +35,13 @@ BURST_TIME = RELEASE_TIME + FUSE_DELAY
 BURST_POINT = RELEASE_POINT + UAV_VELOCITY * FUSE_DELAY
 BURST_POINT[2] = RELEASE_POINT[2] - 0.5 * GRAVITY * FUSE_DELAY**2
 
+EXPECTED_RELEASE_POINT = np.array([17620.0, 0.0, 1800.0])
+EXPECTED_BURST_POINT = np.array([17188.0, 0.0, 1736.496])
+if not np.allclose(RELEASE_POINT, EXPECTED_RELEASE_POINT, atol=1e-9):
+    raise ValueError(f"投放点计算错误：{RELEASE_POINT}")
+if not np.allclose(BURST_POINT, EXPECTED_BURST_POINT, atol=1e-9):
+    raise ValueError(f"起爆点计算错误：{BURST_POINT}")
+
 COLORS = {
     "missile": "#c84b31",
     "uav": "#245b8a",
@@ -562,10 +569,13 @@ def draw_global_scene(output_directory: Path) -> Path:
         linestyle="-.",
         linewidth=3.0,
     )
+    missile_arrow_start = MISSILE_INITIAL + 0.36 * (
+        FALSE_TARGET - MISSILE_INITIAL
+    )
     axis.quiver(
-        *MISSILE_INITIAL,
+        *missile_arrow_start,
         *MISSILE_DIRECTION,
-        length=3200,
+        length=2800,
         normalize=True,
         color=COLORS["missile"],
         linewidth=2.5,
@@ -628,8 +638,9 @@ def draw_global_scene(output_directory: Path) -> Path:
         fontsize=14,
     )
 
-    axis.set_xlim(20600, -600)
-    axis.set_ylim(-350, 650)
+    axis.set_xlim(20600, 0)
+    axis.set_ylim(0, 650)
+    axis.set_yticks([200, 400, 600])
     axis.set_zlim(0, 2350)
     axis.set_box_aspect((2.55, 1.0, 1.18))
     axis.view_init(elev=20, azim=72)
@@ -652,18 +663,18 @@ def draw_global_scene(output_directory: Path) -> Path:
         axis,
         "$FY_1(0)$：无人机",
         UAV_INITIAL,
-        (-8, -44),
+        (20, -42),
         COLORS["uav"],
-        horizontal_alignment="right",
+        horizontal_alignment="left",
         fontsize=14,
     )
     annotate_3d(
         axis,
         "假目标 $O$",
         FALSE_TARGET,
-        (0, 38),
+        (28, 42),
         COLORS["false"],
-        horizontal_alignment="center",
+        horizontal_alignment="left",
         fontsize=14,
     )
     annotate_3d(
@@ -804,6 +815,32 @@ def draw_release_burst_process(output_directory: Path) -> Path:
         linewidth=1.0,
         depthshade=False,
     )
+
+    # 将关键点正交投影到前侧 x 轴，消除三维透视造成的横坐标错觉。
+    z_floor = 1670.0
+    y_front = 60.0
+    for point, color in (
+        (RELEASE_POINT, COLORS["bomb"]),
+        (BURST_POINT, COLORS["uav"]),
+    ):
+        axis.plot(
+            [point[0], point[0], point[0]],
+            [point[1], point[1], y_front],
+            [point[2], z_floor, z_floor],
+            color=color,
+            linestyle=(0, (2, 2)),
+            linewidth=1.5,
+            alpha=0.82,
+        )
+        axis.scatter(
+            point[0],
+            y_front,
+            z_floor,
+            s=70,
+            marker="|",
+            color=color,
+            depthshade=False,
+        )
     axis.quiver(
         *UAV_INITIAL,
         *UAV_DIRECTION,
@@ -817,6 +854,7 @@ def draw_release_burst_process(output_directory: Path) -> Path:
     axis.set_xlim(17950, 16920)
     axis.set_ylim(-70, 70)
     axis.set_zlim(1670, 1855)
+    axis.set_xticks([17000, 17188, 17400, 17620, 17800])
     axis.set_yticks([-60, 0, 60])
     axis.set_zticks([1680, 1720, 1760, 1800, 1840])
     axis.set_box_aspect((2.35, 0.78, 1.05))
@@ -848,19 +886,19 @@ def draw_release_burst_process(output_directory: Path) -> Path:
     )
     annotate_3d(
         axis,
-        "$P_r$：烟幕弹投放点\n$t=1.5$ s",
+        "$P_r=(17620,0,1800)$ m\n烟幕弹投放点，$t=1.5$ s",
         RELEASE_POINT,
-        (10, 38),
+        (12, 38),
         COLORS["bomb"],
-        fontsize=14,
+        fontsize=13,
     )
     annotate_3d(
         axis,
-        "$P_b$：烟幕弹起爆点\n$t=5.1$ s",
+        "$P_b=(17188,0,1736.496)$ m\n烟幕弹起爆点，$t=5.1$ s",
         BURST_POINT,
-        (18, -42),
+        (20, -42),
         COLORS["uav"],
-        fontsize=14,
+        fontsize=13,
     )
 
     path = output_directory / "q1_release_burst_3d.png"
