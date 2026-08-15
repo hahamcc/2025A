@@ -8,6 +8,17 @@ from typing import Callable
 
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.smoke_evaluator import (
+    Deployment,
+    SamplingConfig,
+    ScenarioParameters,
+    SmokeEvaluator,
+)
+
 
 @dataclass(frozen=True)
 class CriticalState:
@@ -58,35 +69,52 @@ class Q1Model:
 
     def __init__(self, parameters: Q1Parameters) -> None:
         self.p = parameters
-        self.missile_initial = np.asarray(parameters.missile_initial, dtype=float)
-        self.uav_initial = np.asarray(parameters.uav_initial, dtype=float)
-        self.target_point = np.asarray(parameters.target_bottom_center, dtype=float)
-
-        # M1 以恒定速率直指假目标原点。
-        self.missile_direction = -self.missile_initial / np.linalg.norm(
-            self.missile_initial
+        scenario = ScenarioParameters(
+            gravity=parameters.gravity,
+            missile_speed=parameters.missile_speed,
+            cloud_sink_speed=parameters.cloud_sink_speed,
+            cloud_radius=parameters.cloud_radius,
+            cloud_lifetime=parameters.cloud_lifetime,
+            missile_initial=parameters.missile_initial,
+            uav_initial=parameters.uav_initial,
+            target_bottom_center=parameters.target_bottom_center,
+            target_radius=parameters.target_radius,
+            target_height=parameters.target_height,
         )
-        self.missile_velocity = parameters.missile_speed * self.missile_direction
-
-        # FY1 等高度朝假目标的水平投影方向飞行，即沿 x 轴负方向。
-        self.uav_direction = np.array([-1.0, 0.0, 0.0])
-        self.uav_velocity = parameters.uav_speed * self.uav_direction
-
-        self.burst_time = parameters.release_time + parameters.fuse_delay
-        self.release_point = self.uav_position(parameters.release_time)
-        self.burst_point = self.bomb_position(self.burst_time)
-
-        self.missile_impact_time = (
-            np.linalg.norm(self.missile_initial) / parameters.missile_speed
+        sampling = SamplingConfig(
+            angle_count=parameters.angle_count,
+            height_count=parameters.height_count,
+            radial_count=parameters.radial_count,
+            scan_step=parameters.scan_step,
+            root_tolerance=parameters.root_tolerance,
         )
-        self.valid_start = self.burst_time
-        self.valid_end = min(
-            self.burst_time + parameters.cloud_lifetime,
-            self.missile_impact_time,
+        self._shared_evaluator = SmokeEvaluator(scenario, sampling)
+        deployment = Deployment(
+            heading=float(np.pi),
+            speed=parameters.uav_speed,
+            release_time=parameters.release_time,
+            fuse_delay=parameters.fuse_delay,
         )
+        simulation = self._shared_evaluator.simulation(deployment)
+        if simulation is None:
+            raise RuntimeError("问题一固定投放方案在共享评价内核中不可行。")
+        self._shared_simulation = simulation
 
-        self.cylinder_surface_points = self._build_cylinder_surface_points()
-        self.cylinder_rim_points = self._build_cylinder_rim_points()
+        self.missile_initial = simulation.missile_initial
+        self.uav_initial = simulation.uav_initial
+        self.target_point = simulation.target_point
+        self.missile_direction = simulation.missile_direction
+        self.missile_velocity = simulation.missile_velocity
+        self.uav_direction = simulation.uav_direction
+        self.uav_velocity = simulation.uav_velocity
+        self.burst_time = simulation.burst_time
+        self.release_point = simulation.release_point
+        self.burst_point = simulation.burst_point
+        self.missile_impact_time = simulation.missile_impact_time
+        self.valid_start = simulation.valid_start
+        self.valid_end = simulation.valid_end
+        self.cylinder_surface_points = simulation.cylinder_surface_points
+        self.cylinder_rim_points = simulation.cylinder_rim_points
 
     # ------------------------------------------------------------------
     # 主体一：来袭导弹 M1
@@ -231,35 +259,15 @@ class Q1Model:
 
     def point_target_margin(self, time: float) -> float:
         """点目标模型的遮蔽裕量；非负表示有效遮蔽。"""
-
-        distances = self._distances_to_sight_segments(
-            self.cloud_center(time),
-            self.missile_position(time),
-            self.target_point[None, :],
-        )
-        return self.p.cloud_radius - float(distances[0])
+        return self._shared_simulation.point_target_margin(time)
 
     def cylinder_target_margin(self, time: float) -> float:
         """完整圆柱模型的遮蔽裕量；非负表示整个目标均被遮蔽。"""
-
-        distances = self._distances_to_sight_segments(
-            self.cloud_center(time),
-            self.missile_position(time),
-            self.cylinder_surface_points,
-        )
-        worst_distance = float(np.max(distances))
-        return self.p.cloud_radius - worst_distance
+        return self._shared_simulation.cylinder_target_margin(time)
 
     def cylinder_rim_margin(self, time: float) -> float:
         """双圆周降维模型的遮蔽裕量；非负表示两条边缘圆周均被遮挡。"""
-
-        distances = self._distances_to_sight_segments(
-            self.cloud_center(time),
-            self.missile_position(time),
-            self.cylinder_rim_points,
-        )
-        worst_distance = float(np.max(distances))
-        return self.p.cloud_radius - worst_distance
+        return self._shared_simulation.cylinder_rim_margin(time)
 
     def diagnose_cylinder_boundary(
         self,
@@ -351,44 +359,7 @@ class Q1Model:
         margin_function: Callable[[float], float],
     ) -> list[tuple[float, float]]:
         """求烟幕有效时间窗内所有遮蔽区间。"""
-
-        times = np.arange(
-            self.valid_start,
-            self.valid_end,
-            self.p.scan_step,
-            dtype=float,
-        )
-        if times.size == 0 or times[-1] < self.valid_end:
-            times = np.append(times, self.valid_end)
-
-        margins = np.array([margin_function(float(time)) for time in times])
-        inside = margins >= 0.0
-
-        intervals: list[tuple[float, float]] = []
-        current_start: float | None = self.valid_start if inside[0] else None
-
-        for index in range(1, len(times)):
-            if inside[index] == inside[index - 1]:
-                continue
-
-            boundary = self._bisect_boundary(
-                margin_function,
-                float(times[index - 1]),
-                float(times[index]),
-            )
-
-            if inside[index]:
-                current_start = boundary
-            else:
-                if current_start is None:
-                    raise RuntimeError("发现遮蔽结束边界，但没有对应的开始边界。")
-                intervals.append((current_start, boundary))
-                current_start = None
-
-        if current_start is not None:
-            intervals.append((current_start, self.valid_end))
-
-        return intervals
+        return self._shared_simulation.find_effective_intervals(margin_function)
 
     @staticmethod
     def total_duration(intervals: list[tuple[float, float]]) -> float:
