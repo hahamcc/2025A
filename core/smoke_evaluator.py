@@ -77,6 +77,21 @@ class EvaluationResult:
     duration: float
 
 
+@dataclass(frozen=True)
+class MarginDiagnostic:
+    """某一时刻、某一目标采样口径下的最不利视线诊断结果。"""
+
+    time: float
+    mode: SamplingMode
+    cloud_center: np.ndarray
+    missile_position: np.ndarray
+    target_point: np.ndarray
+    closest_point: np.ndarray
+    closest_projection: float
+    max_distance: float
+    margin: float
+
+
 class SmokeEvaluator:
     """共享且只读的评价内核；目标采样点只在构造时生成一次。"""
 
@@ -323,6 +338,48 @@ class SmokeSimulation:
             target_points,
         )
         return self.parameters.cloud_radius - float(np.max(distances))
+
+    def margin_diagnostic(
+        self,
+        time: float,
+        mode: SamplingMode = "surface",
+    ) -> MarginDiagnostic:
+        """返回最不利目标点及其对应有限视线段的完整几何信息。
+
+        该接口服务于结果复核与绘图；计算口径与 ``margin_function`` 完全
+        一致。调用时刻必须位于烟幕起爆后。
+        """
+
+        if mode == "point":
+            target_points = self.target_point[None, :]
+        elif mode == "rim":
+            target_points = self.cylinder_rim_points
+        elif mode == "surface":
+            target_points = self.cylinder_surface_points
+        else:
+            raise ValueError(f"未知采样模式：{mode}")
+
+        cloud_center = self.cloud_center(time)
+        missile_position = self.missile_position(time)
+        directions = target_points - missile_position
+        denominators = np.einsum("ij,ij->i", directions, directions)
+        projection = directions @ (cloud_center - missile_position) / denominators
+        projection = np.clip(projection, 0.0, 1.0)
+        closest_points = missile_position + projection[:, None] * directions
+        distances = np.linalg.norm(closest_points - cloud_center, axis=1)
+        worst_index = int(np.argmax(distances))
+        max_distance = float(distances[worst_index])
+        return MarginDiagnostic(
+            time=float(time),
+            mode=mode,
+            cloud_center=cloud_center.copy(),
+            missile_position=missile_position.copy(),
+            target_point=target_points[worst_index].copy(),
+            closest_point=closest_points[worst_index].copy(),
+            closest_projection=float(projection[worst_index]),
+            max_distance=max_distance,
+            margin=self.parameters.cloud_radius - max_distance,
+        )
 
     def point_target_margin(self, time: float) -> float:
         return self._margin_for_points(time, self.target_point[None, :])

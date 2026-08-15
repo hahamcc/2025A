@@ -3,6 +3,7 @@
 from .smoke_evaluator import (
     Deployment,
     EvaluationResult,
+    MarginDiagnostic,
     SamplingConfig,
     ScenarioParameters,
     SmokeEvaluator,
@@ -12,6 +13,7 @@ from .smoke_evaluator import (
 __all__ = [
     "Deployment",
     "EvaluationResult",
+    "MarginDiagnostic",
     "SamplingConfig",
     "ScenarioParameters",
     "SmokeEvaluator",

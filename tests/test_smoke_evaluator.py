@@ -44,6 +44,24 @@ class SmokeEvaluatorTest(unittest.TestCase):
         self.assertTrue(result.feasible)
         self.assertAlmostEqual(result.duration, 1.391642669308926, places=8)
 
+    def test_margin_diagnostic_matches_full_surface_margin(self) -> None:
+        simulation = self.evaluator.simulation(self.q1_deployment)
+        self.assertIsNotNone(simulation)
+        assert simulation is not None
+        diagnostic = simulation.margin_diagnostic(8.5, mode="surface")
+        self.assertAlmostEqual(
+            diagnostic.margin,
+            simulation.cylinder_target_margin(8.5),
+            places=10,
+        )
+        self.assertAlmostEqual(
+            diagnostic.max_distance + diagnostic.margin,
+            10.0,
+            places=10,
+        )
+        self.assertGreaterEqual(diagnostic.closest_projection, 0.0)
+        self.assertLessEqual(diagnostic.closest_projection, 1.0)
+
     def test_q2_time_constraint_rejects_infeasible_solution(self) -> None:
         result = self.evaluator.evaluate(
             Deployment(math.pi, 120.0, 10.0, 4.0), mode="rim"

@@ -122,6 +122,7 @@ class SearchRun:
     message: str
     best_result: EvaluationResult
     candidates: tuple[Candidate, ...]
+    history: tuple[float, ...]
 
 
 class DurationObjective:
@@ -414,6 +415,17 @@ def run_seed(
     time_constraint = NonlinearConstraint(
         lambda vector: MAX_BURST_TIME - vector[2] - vector[3], 0.0, np.inf
     )
+    history: list[float] = []
+
+    def capture_generation(intermediate_result) -> bool:
+        """保存每一代结束时的历史最优遮蔽时长。"""
+
+        current = max(0.0, -float(intermediate_result.fun))
+        if history:
+            current = max(history[-1], current)
+        history.append(current)
+        return False
+
     started = time.perf_counter()
     result = differential_evolution(
         objective,
@@ -428,6 +440,7 @@ def run_seed(
         polish=False,
         updating="immediate",
         workers=1,
+        callback=capture_generation,
     )
     elapsed_seconds = time.perf_counter() - started
     population = np.asarray(result.population, dtype=float)
@@ -447,6 +460,8 @@ def run_seed(
         if (low_result := objective.result_for(population[index])).feasible
     ]
     best_result = objective.result_for(result.x)
+    if not history:
+        history.append(best_result.duration if best_result.feasible else 0.0)
     if best_result.feasible and all(
         candidate_key(candidate)
         != (
@@ -479,6 +494,7 @@ def run_seed(
         message=str(result.message),
         best_result=best_result,
         candidates=tuple(candidates),
+        history=tuple(history),
     )
 
 
@@ -604,7 +620,7 @@ def save_outputs(
     coarse: CoarseSearch,
     runs: Sequence[SearchRun],
     reviewed: Sequence[tuple[Candidate, EvaluationResult, EvaluationResult]],
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path]:
     selected_keys = {candidate_key(center): center.region_index for center in coarse.region_centers}
     coarse_rows = []
     for sample in coarse.samples:
@@ -668,13 +684,27 @@ def save_outputs(
         row["high_rim_duration_s"] = f"{rim_result.duration:.10f}"
         row["selected"] = str(rank == 1)
         best_rows.append(row)
+    history_rows = []
+    for run in runs:
+        history_rows.extend(
+            {
+                "profile": profile.name,
+                "region_index": str(run.region_index),
+                "seed": str(run.seed),
+                "generation": str(generation),
+                "best_duration_s": f"{duration:.10f}",
+            }
+            for generation, duration in enumerate(run.history, start=1)
+        )
     coarse_path = Q2_DIR / "q2_coarse_search.csv"
     search_path = Q2_DIR / "q2_search_runs.csv"
     best_path = Q2_DIR / "q2_best_solution.csv"
+    history_path = Q2_DIR / "q2_de_history.csv"
     write_csv(coarse_path, coarse_rows)
     write_csv(search_path, search_rows)
     write_csv(best_path, best_rows)
-    return coarse_path, search_path, best_path
+    write_csv(history_path, history_rows)
+    return coarse_path, search_path, best_path, history_path
 
 
 def print_final_result(
