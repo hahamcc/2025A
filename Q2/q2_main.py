@@ -30,7 +30,24 @@ from core.smoke_evaluator import (  # noqa: E402
 Q2_DIR = Path(__file__).resolve().parent
 MAX_BURST_TIME = 13.94
 COARSE_SEED = 20250818
-DIRECTED_SEEDS = (20250821, 20250822, 20250823, 20250824, 20250825, 20250826)
+DIRECTED_SEEDS = (
+    20250831,
+    20250901,
+    20250902,
+    20250903,
+    20250904,
+    20250905,
+    20250906,
+    20250907,
+    20250908,
+    20250909,
+)
+LOCAL_WINDOWS = (
+    (np.deg2rad(1.0), 2.0, 0.20, 0.20, 20),
+    (np.deg2rad(0.2), 0.5, 0.05, 0.05, 15),
+    (np.deg2rad(0.05), 0.1, 0.01, 0.01, 10),
+)
+LOCAL_CANDIDATE_COUNT = 5
 BOUNDS = (
     (0.0, 2.0 * np.pi),
     (70.0, 140.0),
@@ -123,6 +140,20 @@ class SearchRun:
     best_result: EvaluationResult
     candidates: tuple[Candidate, ...]
     history: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class LocalSearchRun:
+    """一个候选方案的一轮局部 DE 精修记录。"""
+
+    candidate_rank: int
+    round_index: int
+    seed: int
+    elapsed_seconds: float
+    iterations: int
+    evaluations: int
+    start_result: EvaluationResult
+    best_result: EvaluationResult
 
 
 class DurationObjective:
@@ -435,7 +466,7 @@ def run_seed(
         popsize=profile.popsize,
         maxiter=profile.maxiter,
         init=initial_population,
-        tol=0.01,
+        tol=1.0e-5,
         atol=0.0,
         polish=False,
         updating="immediate",
@@ -496,6 +527,117 @@ def run_seed(
         candidates=tuple(candidates),
         history=tuple(history),
     )
+
+
+def local_bounds(
+    deployment: Deployment,
+    window: tuple[float, float, float, float, int],
+) -> tuple[tuple[float, float], ...]:
+    """以当前候选为中心构造一轮局部搜索边界。"""
+
+    heading_window, speed_window, release_window, fuse_window, _ = window
+    return (
+        (
+            max(0.0, deployment.heading - heading_window),
+            min(2.0 * np.pi, deployment.heading + heading_window),
+        ),
+        (
+            max(70.0, deployment.speed - speed_window),
+            min(140.0, deployment.speed + speed_window),
+        ),
+        (
+            max(0.0, deployment.release_time - release_window),
+            min(MAX_BURST_TIME, deployment.release_time + release_window),
+        ),
+        (
+            max(0.0, deployment.fuse_delay - fuse_window),
+            min(MAX_BURST_TIME, deployment.fuse_delay + fuse_window),
+        ),
+    )
+
+
+def refine_candidate(
+    candidate: Candidate,
+    candidate_rank: int,
+    evaluator: SmokeEvaluator,
+) -> tuple[Candidate, list[LocalSearchRun]]:
+    """对一个高精度候选连续执行三轮缩窗局部 DE。"""
+
+    current = Candidate(
+        deployment=candidate.deployment,
+        source="local_de_start",
+        source_seed=candidate.source_seed,
+        source_rank=candidate_rank,
+        low_result=evaluator.evaluate(candidate.deployment, mode="rim"),
+        region_index=candidate.region_index,
+    )
+    records: list[LocalSearchRun] = []
+    for round_index, window in enumerate(LOCAL_WINDOWS, start=1):
+        seed = 20251000 + 100 * candidate_rank + round_index
+        objective = DurationObjective(evaluator)
+        bounds = local_bounds(current.deployment, window)
+        time_constraint = NonlinearConstraint(
+            lambda vector: MAX_BURST_TIME - vector[2] - vector[3],
+            0.0,
+            np.inf,
+        )
+        started = time.perf_counter()
+        result = differential_evolution(
+            objective,
+            bounds=bounds,
+            constraints=(time_constraint,),
+            seed=seed,
+            popsize=5,
+            maxiter=window[4],
+            x0=vector_from_deployment(current.deployment),
+            tol=1.0e-8,
+            atol=0.0,
+            polish=False,
+            updating="immediate",
+            workers=1,
+        )
+        elapsed_seconds = time.perf_counter() - started
+        best_result = objective.result_for(result.x)
+        records.append(
+            LocalSearchRun(
+                candidate_rank=candidate_rank,
+                round_index=round_index,
+                seed=seed,
+                elapsed_seconds=elapsed_seconds,
+                iterations=int(result.nit),
+                evaluations=int(result.nfev),
+                start_result=current.low_result,
+                best_result=best_result,
+            )
+        )
+        current = Candidate(
+            deployment=best_result.deployment,
+            source="local_de_round",
+            source_seed=seed,
+            source_rank=round_index,
+            low_result=best_result,
+            region_index=candidate_rank,
+        )
+    return current, records
+
+
+def refine_reviewed_candidates(
+    reviewed: Sequence[tuple[Candidate, EvaluationResult, EvaluationResult]],
+) -> tuple[list[Candidate], list[LocalSearchRun]]:
+    """精修完整表面排名靠前的候选，搜索阶段仍使用双圆周评价。"""
+
+    evaluator = build_evaluator(180, 0.02)
+    refined: list[Candidate] = []
+    records: list[LocalSearchRun] = []
+    for rank, (candidate, _, _) in enumerate(
+        reviewed[:LOCAL_CANDIDATE_COUNT], start=1
+    ):
+        final_candidate, candidate_records = refine_candidate(
+            candidate, rank, evaluator
+        )
+        refined.append(final_candidate)
+        records.extend(candidate_records)
+    return refined, records
 
 
 def deduplicate_candidates(candidates: Sequence[Candidate]) -> list[Candidate]:
@@ -598,13 +740,24 @@ def write_csv(path: Path, rows: Sequence[dict[str, str]]) -> None:
 
 def solve(
     profile: SearchProfile,
-) -> tuple[CoarseSearch, list[SearchRun], list[tuple[Candidate, EvaluationResult, EvaluationResult]]]:
+) -> tuple[
+    CoarseSearch,
+    list[SearchRun],
+    list[LocalSearchRun],
+    list[tuple[Candidate, EvaluationResult, EvaluationResult]],
+]:
     run_q1_regression()
     coarse = run_coarse_search(profile)
     evaluator = build_evaluator(profile.angle_count, profile.scan_step)
     runs = [
-        run_seed(profile, seed, evaluator, center, coarse.region_centers)
-        for seed, center in zip(DIRECTED_SEEDS[: profile.region_count], coarse.region_centers)
+        run_seed(
+            profile,
+            seed,
+            evaluator,
+            coarse.region_centers[index % len(coarse.region_centers)],
+            coarse.region_centers,
+        )
+        for index, seed in enumerate(DIRECTED_SEEDS)
     ]
     candidate_pool: list[Candidate] = list(coarse.region_centers)
     candidate_pool.extend(candidate for run in runs for candidate in run.candidates)
@@ -612,15 +765,26 @@ def solve(
         deduplicate_candidates(candidate_pool), profile.high_rim_count
     )
     reviewed = final_surface_review(reranked, profile.surface_count)
-    return coarse, runs, reviewed
+    refined_candidates, local_runs = refine_reviewed_candidates(reviewed)
+    candidate_pool.extend(refined_candidates)
+    final_reranked = rerank_candidates(
+        deduplicate_candidates(candidate_pool),
+        max(profile.high_rim_count, len(refined_candidates) + 10),
+    )
+    final_reviewed = final_surface_review(
+        final_reranked,
+        max(profile.surface_count, len(refined_candidates) + 5),
+    )
+    return coarse, runs, local_runs, final_reviewed
 
 
 def save_outputs(
     profile: SearchProfile,
     coarse: CoarseSearch,
     runs: Sequence[SearchRun],
+    local_runs: Sequence[LocalSearchRun],
     reviewed: Sequence[tuple[Candidate, EvaluationResult, EvaluationResult]],
-) -> tuple[Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path]:
     selected_keys = {candidate_key(center): center.region_index for center in coarse.region_centers}
     coarse_rows = []
     for sample in coarse.samples:
@@ -696,15 +860,44 @@ def save_outputs(
             }
             for generation, duration in enumerate(run.history, start=1)
         )
+    local_rows = []
+    for run in local_runs:
+        row = result_row(
+            run.best_result,
+            profile=profile.name,
+            record_type="local_de_round",
+            candidate=Candidate(
+                run.best_result.deployment,
+                "local_de_round",
+                run.seed,
+                run.round_index,
+                run.best_result,
+                run.candidate_rank,
+            ),
+            elapsed_seconds=run.elapsed_seconds,
+            iterations=run.iterations,
+            evaluations=run.evaluations,
+            success=True,
+            message="local refinement",
+        )
+        row["candidate_rank"] = str(run.candidate_rank)
+        row["local_round"] = str(run.round_index)
+        row["start_duration_s"] = f"{run.start_result.duration:.10f}"
+        row["improvement_s"] = (
+            f"{run.best_result.duration - run.start_result.duration:.10f}"
+        )
+        local_rows.append(row)
     coarse_path = Q2_DIR / "q2_coarse_search.csv"
     search_path = Q2_DIR / "q2_search_runs.csv"
     best_path = Q2_DIR / "q2_best_solution.csv"
     history_path = Q2_DIR / "q2_de_history.csv"
+    local_path = Q2_DIR / "q2_local_refinement.csv"
     write_csv(coarse_path, coarse_rows)
     write_csv(search_path, search_rows)
     write_csv(best_path, best_rows)
     write_csv(history_path, history_rows)
-    return coarse_path, search_path, best_path, history_path
+    write_csv(local_path, local_rows)
+    return coarse_path, search_path, best_path, history_path, local_path
 
 
 def print_final_result(
@@ -741,9 +934,9 @@ def main() -> None:
     profile = PROFILES[arguments.profile]
     print("正在执行 Q1 共享内核回归检查……")
     started = time.perf_counter()
-    coarse, runs, reviewed = solve(profile)
+    coarse, runs, local_runs, reviewed = solve(profile)
     print_final_result(coarse, reviewed)
-    paths = save_outputs(profile, coarse, runs, reviewed)
+    paths = save_outputs(profile, coarse, runs, local_runs, reviewed)
     for path in paths:
         print(f"结果已保存至: {path}")
     print(f"总运行时间: {time.perf_counter() - started:.2f} s")
