@@ -88,8 +88,10 @@ PROFILES = {
         seeds=STANDARD_SEEDS,
         point_population_size=80,
         point_maxiter=180,
-        population_size=48,
-        maxiter=80,
+        # 点目标阶段负责全域找方向；完整表面阶段承担精调，因此将其
+        # 搜索强度提高到 64 个体、120 代，同时保持三种子可并行。
+        population_size=64,
+        maxiter=120,
         search_grid=(36, 5, 5, 0.10),
         rerank_grid=(120, 7, 7, 0.02),
         final_grid=(360, 11, 11, 0.01),
@@ -103,6 +105,11 @@ PROFILES = {
         final_adaptive=AdaptiveSurfaceConfig(
             rho_min=0.10, max_depth=12, max_patches=100_000, scan_step=0.02, root_tolerance=1.0e-6
         ),
+        # 低密度网格下的排名可能变化。扩大传递给高精度评价器的候选池，
+        # 比只在同一低密度网格上盲目增加迭代更能降低误排序风险。
+        top_per_seed=20,
+        rerank_count=20,
+        final_count=5,
     ),
 }
 
