@@ -9,6 +9,16 @@ from .smoke_evaluator import (
     SmokeEvaluator,
     SmokeSimulation,
 )
+from .multi_smoke_evaluator import (
+    AdaptiveSurfaceConfig,
+    JointEvaluationResult,
+    MultiSmokeEvaluator,
+    SurfacePatch,
+    ThreeDeployment,
+    ThreeSmokeSimulation,
+    TimeDiagnostic,
+    UniformReview,
+)
 
 __all__ = [
     "Deployment",
@@ -18,4 +28,12 @@ __all__ = [
     "ScenarioParameters",
     "SmokeEvaluator",
     "SmokeSimulation",
+    "AdaptiveSurfaceConfig",
+    "JointEvaluationResult",
+    "MultiSmokeEvaluator",
+    "SurfacePatch",
+    "ThreeDeployment",
+    "ThreeSmokeSimulation",
+    "TimeDiagnostic",
+    "UniformReview",
 ]
