@@ -1,5 +1,3 @@
-"""汇总多人并行运行的第三问 Standard DE 子任务，并统一进行正式复核。"""
-
 from __future__ import annotations
 
 import argparse

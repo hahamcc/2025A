@@ -1,5 +1,3 @@
-"""问题三：三枚烟幕联合完整遮蔽的标准差分进化求解。"""
-
 from __future__ import annotations
 
 import argparse
