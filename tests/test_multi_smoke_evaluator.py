@@ -22,6 +22,7 @@ from core.multi_smoke_evaluator import (
 from core.smoke_evaluator import ScenarioParameters
 from Q3.q3_main import (
     MAX_BURST_TIME,
+    UniformJointEvaluator,
     build_initial_population,
     decode_vector,
     independent_statistics,
@@ -136,6 +137,24 @@ class MultiSmokeEvaluatorTest(unittest.TestCase):
         self.assertTrue(np.array_equal(first, second))
         self.assertEqual(first.shape, (80, 8))
         self.assertTrue(all(is_feasible_deployment(decode_vector(row)) for row in first))
+
+    def test_three_smoke_uniform_grid_converges_on_external_regression_candidate(self) -> None:
+        """回归参数只验证评价器，不进入搜索初始种群或最终输出。"""
+
+        deployment = ThreeDeployment(
+            heading=np.deg2rad(179.6562501381396),
+            speed=139.99986918044473,
+            release_times=(0.00194328774, 3.57715515, 5.53790100),
+            fuse_delays=(3.61993501, 5.43525310, 6.08136076),
+        )
+        sparse = UniformJointEvaluator(36, 5, 5, 0.05, 1.0e-7).evaluate(
+            deployment
+        )
+        dense = UniformJointEvaluator(180, 9, 9, 0.02, 1.0e-7).evaluate(
+            deployment
+        )
+        self.assertGreater(sparse.duration, 7.0)
+        self.assertAlmostEqual(sparse.duration, dense.duration, places=4)
 
 
 if __name__ == "__main__":

@@ -37,16 +37,22 @@ TEMPLATE_PATH = PROJECT_ROOT / "Resources" / "result1.xlsx"
 MAX_BURST_TIME = 13.9423
 DIMENSION = 8
 BOUNDS = ((0.0, 2.0 * np.pi), (70.0, 140.0), *((0.0, 1.0),) * 6)
-QUICK_SEEDS = (20250831, 20250832)
-STANDARD_SEEDS = (20250831, 20250832, 20250833, 20250834, 20250835)
+QUICK_SEEDS = (1, 2)
+STANDARD_SEEDS = (1, 2, 3)
 
 
 @dataclass(frozen=True)
 class SearchProfile:
     name: str
     seeds: tuple[int, ...]
+    point_population_size: int
+    point_maxiter: int
     population_size: int
     maxiter: int
+    search_grid: tuple[int, int, int, float]
+    rerank_grid: tuple[int, int, int, float]
+    final_grid: tuple[int, int, int, float]
+    verification_grid: tuple[int, int, int, float]
     adaptive: AdaptiveSurfaceConfig
     rerank_adaptive: AdaptiveSurfaceConfig
     final_adaptive: AdaptiveSurfaceConfig
@@ -59,8 +65,14 @@ PROFILES = {
     "quick": SearchProfile(
         name="quick",
         seeds=QUICK_SEEDS,
-        population_size=80,
-        maxiter=40,
+        point_population_size=80,
+        point_maxiter=150,
+        population_size=32,
+        maxiter=35,
+        search_grid=(24, 3, 3, 0.15),
+        rerank_grid=(60, 5, 5, 0.05),
+        final_grid=(180, 9, 9, 0.02),
+        verification_grid=(360, 11, 11, 0.01),
         adaptive=AdaptiveSurfaceConfig(
             rho_min=1.0, max_depth=6, max_patches=5_000, scan_step=0.20, root_tolerance=1.0e-4
         ),
@@ -76,8 +88,14 @@ PROFILES = {
     "standard": SearchProfile(
         name="standard",
         seeds=STANDARD_SEEDS,
-        population_size=80,
-        maxiter=250,
+        point_population_size=80,
+        point_maxiter=180,
+        population_size=48,
+        maxiter=80,
+        search_grid=(36, 5, 5, 0.10),
+        rerank_grid=(120, 7, 7, 0.02),
+        final_grid=(360, 11, 11, 0.01),
+        verification_grid=(720, 21, 15, 0.005),
         adaptive=AdaptiveSurfaceConfig(
             rho_min=0.5, max_depth=8, max_patches=20_000, scan_step=0.10, root_tolerance=1.0e-5
         ),
@@ -115,6 +133,15 @@ class SearchRun:
 
 
 @dataclass(frozen=True)
+class PointSearchResult:
+    vector: np.ndarray
+    population: np.ndarray
+    energies: np.ndarray
+    evaluations: int
+    message: str
+
+
+@dataclass(frozen=True)
 class FinalReview:
     candidate: Candidate
     result: JointEvaluationResult
@@ -122,6 +149,7 @@ class FinalReview:
     individual_durations: tuple[float, ...]
     uniform_review: UniformReview | None = None
     dense_uniform_review: UniformReview | None = None
+    adaptive_review: JointEvaluationResult | None = None
 
 
 def decode_vector(vector: Iterable[float]) -> ThreeDeployment:
@@ -188,8 +216,166 @@ def build_evaluator(config: AdaptiveSurfaceConfig) -> MultiSmokeEvaluator:
     )
 
 
+class UniformJointEvaluator:
+    """缓存完整圆柱表面点的快速联合评价器。
+
+    它与自适应评价器使用完全相同的运动学、有效烟幕集合和
+    ``max_Q min_j d_j`` 联合判据，只把连续表面换成可逐级加密的均匀网格。
+    """
+
+    def __init__(
+        self,
+        angle_count: int,
+        height_count: int,
+        radial_count: int,
+        scan_step: float,
+        root_tolerance: float,
+    ) -> None:
+        self.angle_count = angle_count
+        self.height_count = height_count
+        self.radial_count = radial_count
+        config = AdaptiveSurfaceConfig(
+            scan_step=scan_step,
+            root_tolerance=root_tolerance,
+        )
+        self.evaluator = build_evaluator(config)
+        self.points = ThreeSmokeSimulation.uniform_surface_points(
+            self.evaluator.parameters,
+            angle_count,
+            height_count,
+            radial_count,
+        )
+
+    def evaluate(self, deployment: ThreeDeployment) -> JointEvaluationResult:
+        reason = self.evaluator.validate(deployment)
+        if reason is not None:
+            return JointEvaluationResult(
+                deployment=deployment,
+                feasible=False,
+                reason=reason,
+                release_points=(),
+                burst_points=(),
+                intervals=(),
+                duration=0.0,
+            )
+        simulation = self.evaluator.simulation(deployment)
+        assert simulation is not None
+        review = simulation.uniform_review_points(
+            self.points,
+            angle_count=self.angle_count,
+            height_count=self.height_count,
+            radial_count=self.radial_count,
+        )
+        return JointEvaluationResult(
+            deployment=deployment,
+            feasible=True,
+            reason="",
+            release_points=tuple(point.copy() for point in simulation.release_points),
+            burst_points=tuple(point.copy() for point in simulation.burst_points),
+            intervals=review.intervals,
+            duration=review.duration,
+        )
+
+    def review_from_result(self, result: JointEvaluationResult) -> UniformReview:
+        return UniformReview(
+            intervals=result.intervals,
+            duration=result.duration,
+            angle_count=self.angle_count,
+            height_count=self.height_count,
+            radial_count=self.radial_count,
+        )
+
+
+class PointTargetObjective:
+    """只用于产生全域初值的圆柱中心点近似目标。"""
+
+    def __init__(self, step: float = 0.05) -> None:
+        self.step = step
+        self.parameters = ScenarioParameters(max_burst_time=MAX_BURST_TIME)
+        self.times = np.arange(
+            0.0,
+            MAX_BURST_TIME + self.parameters.cloud_lifetime + 0.5 * step,
+            step,
+        )
+        missile_initial = np.asarray(self.parameters.missile_initial, dtype=float)
+        missile_velocity = (
+            -self.parameters.missile_speed
+            * missile_initial
+            / np.linalg.norm(missile_initial)
+        )
+        self.missiles = missile_initial[None, :] + self.times[:, None] * missile_velocity
+        x0, y0, z0 = self.parameters.target_bottom_center
+        self.target = np.array(
+            [x0, y0, z0 + 0.5 * self.parameters.target_height], dtype=float
+        )
+        self.directions = self.target[None, :] - self.missiles
+        self.denominators = np.einsum(
+            "ij,ij->i", self.directions, self.directions
+        )
+        self.uav_initial = np.asarray(self.parameters.uav_initial, dtype=float)
+        self.cache: dict[tuple[float, ...], tuple[float, float]] = {}
+
+    @staticmethod
+    def key(vector: Iterable[float]) -> tuple[float, ...]:
+        return tuple(round(float(value), 12) for value in vector)
+
+    def metrics(self, vector: Iterable[float]) -> tuple[float, float]:
+        key = self.key(vector)
+        if key in self.cache:
+            return self.cache[key]
+        deployment = decode_vector(key)
+        direction = np.array(
+            [np.cos(deployment.heading), np.sin(deployment.heading), 0.0],
+            dtype=float,
+        )
+        covered = np.zeros(len(self.times), dtype=bool)
+        guide = 0.0
+        for release, delay, burst in zip(
+            deployment.release_times,
+            deployment.fuse_delays,
+            deployment.burst_times,
+        ):
+            burst_point = np.array(
+                [
+                    self.uav_initial[0]
+                    + deployment.speed * burst * direction[0],
+                    self.uav_initial[1]
+                    + deployment.speed * burst * direction[1],
+                    self.uav_initial[2]
+                    - 0.5 * self.parameters.gravity * delay**2,
+                ],
+                dtype=float,
+            )
+            centers = np.repeat(burst_point[None, :], len(self.times), axis=0)
+            centers[:, 2] -= self.parameters.cloud_sink_speed * (
+                self.times - burst
+            )
+            center_from_missile = centers - self.missiles
+            projection = np.einsum(
+                "ij,ij->i", center_from_missile, self.directions
+            ) / self.denominators
+            projection = np.clip(projection, 0.0, 1.0)
+            closest = self.missiles + projection[:, None] * self.directions
+            distances = np.linalg.norm(centers - closest, axis=1)
+            active = (self.times >= burst) & (
+                self.times <= burst + self.parameters.cloud_lifetime
+            )
+            covered |= active & (distances <= self.parameters.cloud_radius)
+            guide += float(np.min(distances[active]))
+        duration = float(np.sum(covered) * self.step)
+        self.cache[key] = (duration, guide)
+        return duration, guide
+
+    def __call__(self, vector: np.ndarray) -> float:
+        duration, guide = self.metrics(vector)
+        # 时长始终是主目标；极小的几何距离项只用于打破相同离散时长的平台。
+        return -duration + 1.0e-4 * guide
+
+
 class DurationObjective:
-    def __init__(self, evaluator: MultiSmokeEvaluator) -> None:
+    def __init__(
+        self, evaluator: MultiSmokeEvaluator | UniformJointEvaluator
+    ) -> None:
         self.evaluator = evaluator
         self.cache: dict[tuple[float, ...], JointEvaluationResult] = {}
 
@@ -246,6 +432,63 @@ def build_initial_population(seed: int, population_size: int) -> np.ndarray:
     return population
 
 
+def build_surface_initial_population(
+    seed: int,
+    population_size: int,
+    point_population: np.ndarray,
+    point_energies: np.ndarray,
+) -> np.ndarray:
+    """用点目标全域搜索的多个优质个体初始化完整表面搜索。"""
+
+    population = build_initial_population(seed + 50_000, population_size)
+    order = np.argsort(point_energies)
+    elite_count = min(8, population_size, len(order))
+    elites = np.asarray(point_population[order[:elite_count]], dtype=float)
+    population[:elite_count] = elites
+    rng = np.random.default_rng(seed + 60_000)
+    cursor = elite_count
+    while cursor < min(population_size, 3 * elite_count):
+        base = elites[(cursor - elite_count) % elite_count].copy()
+        base[0] = (base[0] + rng.normal(0.0, 0.08)) % (2.0 * np.pi)
+        base[1] = np.clip(base[1] + rng.normal(0.0, 4.0), 70.0, 140.0)
+        base[2:] = np.clip(base[2:] + rng.normal(0.0, 0.06, 6), 0.0, 1.0)
+        population[cursor] = base
+        cursor += 1
+    return population
+
+
+def run_point_search(profile: SearchProfile, seed: int) -> PointSearchResult:
+    """用独立随机种子进行一次无锚点的八维点目标全域 DE。"""
+
+    objective = PointTargetObjective(step=0.02)
+    result = differential_evolution(
+        objective,
+        bounds=BOUNDS,
+        strategy="best1bin",
+        popsize=max(5, profile.point_population_size // DIMENSION),
+        maxiter=profile.point_maxiter,
+        mutation=(0.5, 1.0),
+        recombination=0.9,
+        seed=seed,
+        init="latinhypercube",
+        tol=1.0e-7,
+        atol=0.0,
+        polish=False,
+        updating="immediate",
+        workers=1,
+    )
+    population = np.asarray(result.population, dtype=float)
+    energy = np.asarray(result.population_energies, dtype=float)
+    best_index = int(np.argmin(energy))
+    return PointSearchResult(
+        vector=population[best_index].copy(),
+        population=population,
+        energies=energy,
+        evaluations=int(result.nfev),
+        message=str(result.message),
+    )
+
+
 def make_candidate(
     vector: Iterable[float], result: JointEvaluationResult, source: str, seed: int | str, rank: int
 ) -> Candidate:
@@ -254,7 +497,17 @@ def make_candidate(
 
 
 def run_seed(profile: SearchProfile, seed: int) -> SearchRun:
-    evaluator = build_evaluator(profile.adaptive)
+    point_started = time.perf_counter()
+    point_result = run_point_search(profile, seed)
+    point_elapsed = time.perf_counter() - point_started
+    angle_count, height_count, radial_count, scan_step = profile.search_grid
+    evaluator = UniformJointEvaluator(
+        angle_count,
+        height_count,
+        radial_count,
+        scan_step,
+        root_tolerance=max(1.0e-5, scan_step * 1.0e-3),
+    )
     objective = DurationObjective(evaluator)
     history: list[float] = []
 
@@ -263,6 +516,12 @@ def run_seed(profile: SearchProfile, seed: int) -> SearchRun:
         history.append(max(history[-1], current) if history else current)
         return False
 
+    surface_initial = build_surface_initial_population(
+        seed,
+        profile.population_size,
+        point_result.population,
+        point_result.energies,
+    )
     started = time.perf_counter()
     result = differential_evolution(
         objective,
@@ -270,18 +529,18 @@ def run_seed(profile: SearchProfile, seed: int) -> SearchRun:
         strategy="best1bin",
         maxiter=profile.maxiter,
         popsize=10,
-        mutation=0.7,
+        mutation=(0.5, 1.0),
         recombination=0.9,
         seed=seed,
-        init=build_initial_population(seed, profile.population_size),
-        tol=0.01,
+        init=surface_initial,
+        tol=1.0e-5,
         atol=0.0,
         polish=False,
         updating="immediate",
         workers=1,
         callback=callback,
     )
-    elapsed = time.perf_counter() - started
+    elapsed = point_elapsed + time.perf_counter() - started
     population = np.asarray(result.population, dtype=float)
     energies = np.asarray(result.population_energies, dtype=float)
     order = np.argsort(energies)
@@ -303,9 +562,11 @@ def run_seed(profile: SearchProfile, seed: int) -> SearchRun:
         seed=seed,
         elapsed_seconds=elapsed,
         iterations=int(result.nit),
-        evaluations=int(result.nfev),
+        evaluations=int(point_result.evaluations + result.nfev),
         success=bool(result.success),
-        message=str(result.message),
+        message=(
+            f"point: {point_result.message}; surface: {result.message}"
+        ),
         best=best,
         candidates=candidates,
         history=tuple(history),
@@ -327,7 +588,14 @@ def deduplicate_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
 
 
 def rerank_candidates(candidates: Sequence[Candidate], profile: SearchProfile) -> list[Candidate]:
-    evaluator = build_evaluator(profile.rerank_adaptive)
+    angle_count, height_count, radial_count, scan_step = profile.rerank_grid
+    evaluator = UniformJointEvaluator(
+        angle_count,
+        height_count,
+        radial_count,
+        scan_step,
+        root_tolerance=max(1.0e-7, scan_step * 1.0e-4),
+    )
     reranked = [
         make_candidate(
             candidate.vector,
@@ -357,6 +625,22 @@ def independent_statistics(
     return ThreeSmokeSimulation.total_duration(merged), tuple(durations)
 
 
+def independent_uniform_statistics(
+    deployment: ThreeDeployment,
+    evaluator: UniformJointEvaluator,
+) -> tuple[float, tuple[float, ...]]:
+    intervals: list[tuple[float, float]] = []
+    durations: list[float] = []
+    for release, delay in zip(deployment.release_times, deployment.fuse_delays):
+        single = evaluator.evaluate(
+            ThreeDeployment(deployment.heading, deployment.speed, (release,), (delay,))
+        )
+        intervals.extend(single.intervals)
+        durations.append(single.duration)
+    merged = ThreeSmokeSimulation.merge_intervals(intervals)
+    return ThreeSmokeSimulation.total_duration(merged), tuple(durations)
+
+
 def intervals_close(
     first: Sequence[tuple[float, float]], second: Sequence[tuple[float, float]], tolerance: float
 ) -> bool:
@@ -367,39 +651,74 @@ def intervals_close(
 
 
 def final_review(candidates: Sequence[Candidate], profile: SearchProfile) -> list[FinalReview]:
-    evaluator = build_evaluator(profile.final_adaptive)
+    angle_count, height_count, radial_count, scan_step = profile.final_grid
+    evaluator = UniformJointEvaluator(
+        angle_count,
+        height_count,
+        radial_count,
+        scan_step,
+        root_tolerance=1.0e-7,
+    )
     reviewed: list[FinalReview] = []
     for rank, candidate in enumerate(candidates[: profile.final_count], start=1):
-        result = evaluator.evaluate(candidate.deployment, collect_diagnostics=True)
-        independent, individual = independent_statistics(candidate.deployment, profile.final_adaptive)
+        result = evaluator.evaluate(candidate.deployment)
+        independent, individual = independent_uniform_statistics(
+            candidate.deployment, evaluator
+        )
         reviewed.append(
             FinalReview(
-                candidate=make_candidate(candidate.vector, result, "final_adaptive", candidate.seed, rank),
+                candidate=make_candidate(candidate.vector, result, "final_uniform", candidate.seed, rank),
                 result=result,
                 independent_duration=independent,
                 individual_durations=individual,
+                uniform_review=UniformReview(
+                    intervals=candidate.result.intervals,
+                    duration=candidate.result.duration,
+                    angle_count=profile.rerank_grid[0],
+                    height_count=profile.rerank_grid[1],
+                    radial_count=profile.rerank_grid[2],
+                ),
+                dense_uniform_review=evaluator.review_from_result(result),
             )
         )
     reviewed.sort(key=lambda item: (-item.result.duration, candidate_key(item.candidate)))
     if not reviewed:
         return reviewed
     winner = reviewed[0]
-    simulation = evaluator.simulation(winner.candidate.deployment)
-    assert simulation is not None
-    uniform = simulation.uniform_review(720, 21, 15)
-    dense: UniformReview | None = None
-    if (
-        abs(uniform.duration - winner.result.duration) > 0.02
-        or not intervals_close(uniform.intervals, winner.result.intervals, 0.02)
-    ):
-        dense = simulation.uniform_review(1440, 41, 31)
+    verify_angle, verify_height, verify_radial, verify_step = (
+        profile.verification_grid
+    )
+    verification_evaluator = UniformJointEvaluator(
+        verify_angle,
+        verify_height,
+        verify_radial,
+        verify_step,
+        root_tolerance=1.0e-8,
+    )
+    verified_result = verification_evaluator.evaluate(winner.candidate.deployment)
+    verified_independent, verified_individual = independent_uniform_statistics(
+        winner.candidate.deployment, verification_evaluator
+    )
+    adaptive_evaluator = build_evaluator(profile.final_adaptive)
+    adaptive = adaptive_evaluator.evaluate(
+        winner.candidate.deployment, collect_diagnostics=True
+    )
     reviewed[0] = FinalReview(
-        candidate=winner.candidate,
-        result=winner.result,
-        independent_duration=winner.independent_duration,
-        individual_durations=winner.individual_durations,
-        uniform_review=uniform,
-        dense_uniform_review=dense,
+        candidate=make_candidate(
+            winner.candidate.vector,
+            verified_result,
+            "verification_uniform",
+            winner.candidate.seed,
+            winner.candidate.rank,
+        ),
+        result=verified_result,
+        independent_duration=verified_independent,
+        individual_durations=verified_individual,
+        uniform_review=winner.uniform_review,
+        dense_uniform_review=verification_evaluator.review_from_result(
+            verified_result
+        ),
+        adaptive_review=adaptive,
     )
     return reviewed
 
@@ -507,10 +826,16 @@ def save_outputs(
                 "uniform_duration_s": "" if item.uniform_review is None else f"{item.uniform_review.duration:.10f}",
                 "uniform_intervals_s": "" if item.uniform_review is None else format_intervals(item.uniform_review.intervals),
                 "dense_uniform_duration_s": "" if item.dense_uniform_review is None else f"{item.dense_uniform_review.duration:.10f}",
+                "adaptive_lower_bound_s": "" if item.adaptive_review is None else f"{item.adaptive_review.duration:.10f}",
             }
         )
         best_rows.append(row)
-        for diagnostic in item.result.diagnostics:
+        diagnostics_source = (
+            item.adaptive_review.diagnostics
+            if item.adaptive_review is not None
+            else item.result.diagnostics
+        )
+        for diagnostic in diagnostics_source:
             diagnostic_row = {
                 "final_rank": str(rank),
                 "time_s": f"{diagnostic.time:.10f}",
@@ -619,7 +944,7 @@ def print_final_result(reviewed: Sequence[FinalReview]) -> None:
         raise RuntimeError("没有候选方案通过最终联合评价。")
     result = reviewed[0]
     deployment = result.candidate.deployment
-    print("\n问题三推荐方案（自适应完整圆柱表面联合复核）")
+    print("\n问题三推荐方案（分层完整圆柱表面联合求解）")
     print(f"  航向角: {deployment.heading:.10f} rad / {np.degrees(deployment.heading):.8f}°")
     print(f"  飞行速度: {deployment.speed:.8f} m/s")
     for index, (release, delay, burst) in enumerate(
@@ -633,9 +958,22 @@ def print_final_result(reviewed: Sequence[FinalReview]) -> None:
     print(f"  独立遮蔽并集时长: {result.independent_duration:.10f} s")
     print(f"  协同增益: {result.result.duration - result.independent_duration:.10f} s")
     if result.uniform_review is not None:
-        print(f"  720×21×15 均匀网格复核: {result.uniform_review.duration:.10f} s")
+        grid = result.uniform_review
+        print(
+            f"  {grid.angle_count}×{grid.height_count}×{grid.radial_count} "
+            f"候选重排: {grid.duration:.10f} s"
+        )
     if result.dense_uniform_review is not None:
-        print(f"  1440×41×31 加密复核: {result.dense_uniform_review.duration:.10f} s")
+        grid = result.dense_uniform_review
+        print(
+            f"  {grid.angle_count}×{grid.height_count}×{grid.radial_count} "
+            f"最终完整表面复核: {grid.duration:.10f} s"
+        )
+    if result.adaptive_review is not None:
+        print(
+            "  严格自适应保守下界: "
+            f"{result.adaptive_review.duration:.10f} s"
+        )
 
 
 def parse_seed_list(text: str) -> tuple[int, ...]:

@@ -619,6 +619,31 @@ class ThreeSmokeSimulation:
         points = self.uniform_surface_points(
             self.parameters, angle_count, height_count, radial_count
         )
+        return self.uniform_review_points(
+            points,
+            angle_count=angle_count,
+            height_count=height_count,
+            radial_count=radial_count,
+        )
+
+    def uniform_review_points(
+        self,
+        points: np.ndarray,
+        *,
+        angle_count: int,
+        height_count: int,
+        radial_count: int,
+    ) -> UniformReview:
+        """在预生成的完整表面点集上评价联合遮蔽。
+
+        搜索阶段会评价大量候选。将固定的圆柱表面点集放到评价器中缓存，
+        可以避免每次适应度调用都重新生成三角函数和坐标数组。这里仍使用
+        与严格模型相同的 ``max_Q min_j d_j`` 判据，只改变空间离散精度。
+        """
+
+        points = np.asarray(points, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+            raise ValueError("完整表面采样点必须是非空的 N×3 数组。")
         intervals: list[tuple[float, float]] = []
         for left, right, active in self._event_segments():
             if not active:

@@ -17,7 +17,6 @@ from Q3.q3_main import (
     Candidate,
     PROFILES,
     SearchProfile,
-    build_evaluator,
     candidate_row,
     deduplicate_candidates,
     encode_deployment,
@@ -26,6 +25,7 @@ from Q3.q3_main import (
     print_final_result,
     rerank_candidates,
     save_outputs,
+    UniformJointEvaluator,
     write_csv,
 )
 from core.multi_smoke_evaluator import ThreeDeployment
@@ -48,7 +48,14 @@ def deployment_from_row(row: dict[str, str]) -> ThreeDeployment:
 def worker_candidates(rows: Iterable[dict[str, str]], profile: SearchProfile) -> list[Candidate]:
     """只读取每个种子最终种群的前十名，重新按统一低精度口径评价。"""
 
-    evaluator = build_evaluator(profile.adaptive)
+    angle_count, height_count, radial_count, scan_step = profile.search_grid
+    evaluator = UniformJointEvaluator(
+        angle_count,
+        height_count,
+        radial_count,
+        scan_step,
+        root_tolerance=max(1.0e-5, scan_step * 1.0e-3),
+    )
     candidates: list[Candidate] = []
     for row in rows:
         if row.get("record_type") != "de_population":
@@ -105,7 +112,7 @@ def main() -> None:
     required = {str(seed) for seed in profile.seeds}
     if seen_seeds != required:
         parser.error(
-            "Standard 的五个种子必须齐全且仅出现一次；"
+            "Standard 配置中的全部种子必须齐全且仅出现一次；"
             f"当前={sorted(seen_seeds)}，应为={sorted(required)}"
         )
     pool = deduplicate_candidates(all_candidates)
