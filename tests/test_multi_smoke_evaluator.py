@@ -22,6 +22,7 @@ from core.multi_smoke_evaluator import (
 from core.smoke_evaluator import ScenarioParameters
 from Q3.q3_main import (
     MAX_BURST_TIME,
+    PROFILES,
     UniformJointEvaluator,
     build_initial_population,
     decode_vector,
@@ -137,6 +138,14 @@ class MultiSmokeEvaluatorTest(unittest.TestCase):
         self.assertTrue(np.array_equal(first, second))
         self.assertEqual(first.shape, (80, 8))
         self.assertTrue(all(is_feasible_deployment(decode_vector(row)) for row in first))
+
+    def test_standard_profile_uses_strengthened_surface_search(self) -> None:
+        """问题三正式档应采用约定的分层精搜索与扩大候选复核池。"""
+
+        profile = PROFILES["standard"]
+        self.assertEqual((profile.point_population_size, profile.point_maxiter), (80, 180))
+        self.assertEqual((profile.population_size, profile.maxiter), (64, 120))
+        self.assertEqual((profile.top_per_seed, profile.rerank_count, profile.final_count), (20, 20, 5))
 
     def test_three_smoke_uniform_grid_converges_on_external_regression_candidate(self) -> None:
         """回归参数只验证评价器，不进入搜索初始种群或最终输出。"""
