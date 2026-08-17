@@ -1,0 +1,12 @@
+﻿rank,mode,sampled_duration_s,mip_gap,mip_nodes,selected_local_columns,message
+1,center,34.19999999999999,0.0,1,22;0;9;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+2,center,34.19999999999999,0.0,1,22;1;2;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+3,center,34.19999999999999,0.0,1,22;0;2;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+4,center,34.19999999999999,0.0,1,22;1;9;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+5,center,33.99999999999998,6.269494727295006e-16,1,22;0;0;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+6,center,33.99999999999998,6.269494727295006e-16,1,22;0;1;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+7,center,33.99999999999999,0.0,1,24;1;2;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+8,center,33.99999999999999,0.0,1,22;22;2;0;18,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+9,balanced,33.999999999999986,0.0,0,22;0;9;0;10,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+10,lower,25.999999999999947,0.0,1,22;22;2;0;16,Optimization terminated successfully. (HiGHS Status 7: Optimal)
+11,upper,40.200000000000024,0.0,1,22;0;0;0;10,Optimization terminated successfully. (HiGHS Status 7: Optimal)
