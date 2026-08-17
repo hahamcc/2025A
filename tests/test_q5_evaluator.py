@@ -57,6 +57,32 @@ class Q5EvaluatorTest(unittest.TestCase):
         self.assertEqual(len(result.missile_durations), 3)
         self.assertGreater(result.missile_durations[0], 0.0)
 
+    def test_time_batched_status_matches_unbatched_status(self) -> None:
+        strategy = Strategy((UavPlan("FY1", tuple(UAV_INITIALS[0]), math.pi, 120.0, (BombPlan(1.5, 3.6),)),))
+        direct = MultiMissileEvaluator(48, 5, 5, 0.05)
+        batched = MultiMissileEvaluator(48, 5, 5, 0.05, time_batch_size=3, surface_batch_size=11)
+        flat = direct.flatten(strategy)
+        times = np.arange(5.0, 8.0, 0.02)
+        active = direct.active_indices(flat, 0, 6.0)
+        self.assertTrue(active)
+        np.testing.assert_array_equal(
+            direct.status_batch(flat, 0, times, active),
+            batched.status_batch(flat, 0, times, active),
+        )
+        direct_result = direct.evaluate(strategy)
+        batched_result = batched.evaluate(strategy)
+        self.assertEqual(direct_result.missile_intervals, batched_result.missile_intervals)
+
+    def test_margin_sign_matches_complete_surface_status(self) -> None:
+        strategy = Strategy((UavPlan("FY1", tuple(UAV_INITIALS[0]), math.pi, 120.0, (BombPlan(1.5, 3.6),)),))
+        evaluator = MultiMissileEvaluator(48, 5, 5, 0.05, time_batch_size=3, surface_batch_size=11)
+        flat = evaluator.flatten(strategy)
+        times = np.arange(5.0, 8.0, 0.02)
+        active = evaluator.active_indices(flat, 0, 6.0)
+        margin = evaluator.margin_batch(flat, 0, times, active)
+        status = evaluator.status_batch(flat, 0, times, active)
+        np.testing.assert_array_equal(margin >= -1.0e-10, status)
+
 
 if __name__ == "__main__":
     unittest.main()

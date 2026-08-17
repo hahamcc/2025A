@@ -399,6 +399,8 @@ class MultiMissileEvaluator:
         root_tolerance: float | None = None,
         target_points: np.ndarray | None = None,
         use_geometric_skip: bool = True,
+        time_batch_size: int | None = None,
+        surface_batch_size: int | None = 20_000,
     ) -> None:
         self.angle_count = angle_count
         self.height_count = height_count
@@ -407,6 +409,8 @@ class MultiMissileEvaluator:
         self.root_tolerance = float(root_tolerance or max(1.0e-7, scan_step * 1.0e-4))
         self.points = surface_points(angle_count, height_count, radial_count) if target_points is None else np.asarray(target_points, dtype=float)
         self.use_geometric_skip = use_geometric_skip
+        self.time_batch_size = None if time_batch_size is None else max(1, int(time_batch_size))
+        self.surface_batch_size = None if surface_batch_size is None else max(1, int(surface_batch_size))
 
     @property
     def grid(self) -> tuple[int, int, int, float]:
@@ -454,29 +458,128 @@ class MultiMissileEvaluator:
         times = np.asarray(times, dtype=float)
         if not active or len(times) == 0:
             return np.zeros(len(times), dtype=bool)
+        if self.time_batch_size is not None and len(times) > self.time_batch_size:
+            values = np.empty(len(times), dtype=bool)
+            for start in range(0, len(times), self.time_batch_size):
+                stop = min(len(times), start + self.time_batch_size)
+                values[start:stop] = self._status_batch_unbatched(flat, missile_index, times[start:stop], active)
+            return values
+        return self._status_batch_unbatched(flat, missile_index, times, active)
+
+    def margin_batch(
+        self,
+        flat: Sequence[tuple[UavPlan, BombPlan, np.ndarray]],
+        missile_index: int,
+        times: np.ndarray,
+        active: tuple[int, ...],
+    ) -> np.ndarray:
+        """Return the complete-surface joint-occlusion margin in metres.
+
+        A non-negative value has exactly the same meaning as ``status_batch``
+        returning ``True``. It uses the same time/surface batching and finite
+        sight-segment geometry, so diagnostic curves do not introduce another
+        occlusion model.
+        """
+        times = np.asarray(times, dtype=float)
+        if not active or len(times) == 0:
+            return np.full(len(times), -np.inf, dtype=float)
+        if self.time_batch_size is not None and len(times) > self.time_batch_size:
+            values = np.empty(len(times), dtype=float)
+            for start in range(0, len(times), self.time_batch_size):
+                stop = min(len(times), start + self.time_batch_size)
+                values[start:stop] = self._margin_batch_unbatched(
+                    flat, missile_index, times[start:stop], active
+                )
+            return values
+        return self._margin_batch_unbatched(flat, missile_index, times, active)
+
+    def _margin_batch_unbatched(
+        self,
+        flat: Sequence[tuple[UavPlan, BombPlan, np.ndarray]],
+        missile_index: int,
+        times: np.ndarray,
+        active: tuple[int, ...],
+    ) -> np.ndarray:
         missiles = self.missile_positions(missile_index, times)
-        directions = self.points[None, :, :] - missiles[:, None, :]
-        denominators = np.einsum("tpc,tpc->tp", directions, directions)
-        minimum = np.full((len(times), len(self.points)), np.inf, dtype=float)
+        centers_by_cloud = []
         for index in active:
             _, bomb, burst_point = flat[index]
             centers = np.repeat(burst_point[None, :], len(times), axis=0)
             centers[:, 2] -= CLOUD_SINK_SPEED * (times - bomb.burst_time)
-            useful = self._potential_mask(centers, missiles)
-            if not np.any(useful):
-                continue
-            selected = np.flatnonzero(useful)
-            selected_directions = directions[selected]
-            selected_missiles = missiles[selected]
-            selected_centers = centers[selected]
-            projection = np.einsum(
-                "tc,tpc->tp", selected_centers - selected_missiles, selected_directions
-            ) / denominators[selected]
-            projection = np.clip(projection, 0.0, 1.0)
-            closest = selected_missiles[:, None, :] + projection[:, :, None] * selected_directions
-            distances = np.linalg.norm(closest - selected_centers[:, None, :], axis=2)
-            minimum[selected] = np.minimum(minimum[selected], distances)
-        return np.max(minimum, axis=1) <= CLOUD_RADIUS + 1.0e-12
+            centers_by_cloud.append((centers, self._potential_mask(centers, missiles)))
+
+        worst_squared = np.full(len(times), -np.inf, dtype=float)
+        point_step = self.surface_batch_size or len(self.points)
+        for point_start in range(0, len(self.points), point_step):
+            points = self.points[point_start : point_start + point_step]
+            directions = points[None, :, :] - missiles[:, None, :]
+            denominators = np.einsum("tpc,tpc->tp", directions, directions)
+            minimum = np.full((len(times), len(points)), np.inf, dtype=float)
+            for centers, useful in centers_by_cloud:
+                if not np.any(useful):
+                    continue
+                offset = centers - missiles
+                numerator = np.einsum("tc,tpc->tp", offset, directions)
+                projection = np.clip(numerator / denominators, 0.0, 1.0)
+                squared = (
+                    np.einsum("tc,tc->t", offset, offset)[:, None]
+                    - 2.0 * projection * numerator
+                    + projection * projection * denominators
+                )
+                squared = np.maximum(squared, 0.0)
+                squared[~useful, :] = np.inf
+                minimum = np.minimum(minimum, squared)
+            worst_squared = np.maximum(worst_squared, np.max(minimum, axis=1))
+        return CLOUD_RADIUS - np.sqrt(worst_squared)
+
+    def _status_batch_unbatched(
+        self,
+        flat: Sequence[tuple[UavPlan, BombPlan, np.ndarray]],
+        missile_index: int,
+        times: np.ndarray,
+        active: tuple[int, ...],
+    ) -> np.ndarray:
+        """Evaluate one time block; called directly or through ``status_batch`` batching."""
+        missiles = self.missile_positions(missile_index, times)
+        centers_by_cloud = []
+        for index in active:
+            _, bomb, burst_point = flat[index]
+            centers = np.repeat(burst_point[None, :], len(times), axis=0)
+            centers[:, 2] -= CLOUD_SINK_SPEED * (times - bomb.burst_time)
+            centers_by_cloud.append((centers, self._potential_mask(centers, missiles)))
+
+        # At high surface resolutions, batching time alone is insufficient: one 64-time
+        # block can still contain more than 10^5 surface points.  Process the cylinder
+        # in fixed point chunks as well, retaining only the final Boolean per time.
+        valid = np.ones(len(times), dtype=bool)
+        point_step = self.surface_batch_size or len(self.points)
+        for point_start in range(0, len(self.points), point_step):
+            points = self.points[point_start : point_start + point_step]
+            directions = points[None, :, :] - missiles[:, None, :]
+            denominators = np.einsum("tpc,tpc->tp", directions, directions)
+            minimum = np.full((len(times), len(points)), np.inf, dtype=float)
+            for centers, useful in centers_by_cloud:
+                if not np.any(useful):
+                    continue
+                # Squared point-to-segment distance written without constructing the
+                # (time, point, xyz) ``closest`` array.  This is algebraically the
+                # same projection formula, but avoids several large fancy-index copies.
+                offset = centers - missiles
+                numerator = np.einsum("tc,tpc->tp", offset, directions)
+                projection = numerator / denominators
+                projection = np.clip(projection, 0.0, 1.0)
+                squared = (
+                    np.einsum("tc,tc->t", offset, offset)[:, None]
+                    - 2.0 * projection * numerator
+                    + projection * projection * denominators
+                )
+                squared = np.maximum(squared, 0.0)
+                squared[~useful, :] = np.inf
+                minimum = np.minimum(minimum, squared)
+            valid &= np.max(minimum, axis=1) <= (CLOUD_RADIUS + 1.0e-12) ** 2
+            if not np.any(valid):
+                return valid
+        return valid
 
     def status(self, flat, missile_index: int, time_value: float, active: tuple[int, ...]) -> bool:
         return bool(self.status_batch(flat, missile_index, np.array((time_value,)), active)[0])

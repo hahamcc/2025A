@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -19,8 +20,9 @@ from Q5.q5_column_generation import (
     softmax_gap_decode,
     solve_balanced_master,
     solve_integer_master,
+    select_diverse_refinement_candidates,
 )
-from Q5.q5_main import MIN_RELEASE_GAP
+from Q5.q5_main import MIN_RELEASE_GAP, Strategy
 
 
 class Q5ColumnGenerationTest(unittest.TestCase):
@@ -64,6 +66,25 @@ class Q5ColumnGenerationTest(unittest.TestCase):
         )
         self.assertEqual(len(balanced.selected_global_indices), 5)
         self.assertGreaterEqual(balanced.sampled_duration, solution.sampled_duration - tiny_profile.time_step - 1.0e-8)
+
+    def test_diverse_refinement_keeps_balanced_representative(self) -> None:
+        reviewed = []
+        vectors = (
+            (0.1, 0.2, 0.0, 0.2, -0.2, 0.0, 0.1, 0.3, 0.5),
+            (1.4, 0.7, 1.0, -1.0, 0.2, 0.0, 0.3, 0.5, 0.7),
+            (2.8, 0.4, -1.0, 1.0, 0.0, 0.4, 0.2, 0.4, 0.6),
+            (4.2, 0.9, 0.5, 0.5, -0.5, -0.5, 0.4, 0.6, 0.8),
+            (5.6, 0.5, -0.8, -0.2, 0.8, 0.2, 0.6, 0.4, 0.2),
+        )
+        for index, vector in enumerate(vectors):
+            plans = tuple(softmax_gap_decode(np.asarray(vector), uav_index) for uav_index in range(5))
+            source = "master_balanced" if index == 2 else f"candidate_{index}"
+            reviewed.append(
+                (source, Strategy(plans), SimpleNamespace(total_duration=10.0 - 0.1 * index, minimum_duration=2.0 + 0.1 * index, positive_count=3))
+            )
+        selected = select_diverse_refinement_candidates(reviewed, count=4, max_total_loss=1.0)
+        self.assertEqual(len(selected), 4)
+        self.assertIn("master_balanced", [item[0] for item in selected])
 
 
 if __name__ == "__main__":

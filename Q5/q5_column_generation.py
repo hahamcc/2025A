@@ -103,7 +103,7 @@ PROFILES = {
         "quick", 0.40, 12, 3, 3, 1, 24, 15, 800, 2, 4, 60.0, 1.0e-6, 1, 24, 10, 1
     ),
     "standard": ColumnProfile(
-        "standard", 0.20, 24, 4, 4, 3, 48, 50, 3000, 4, 8, 300.0, 1.0e-8, 2, 36, 25, 1
+        "standard", 0.20, 24, 4, 4, 3, 48, 50, 3000, 4, 8, 300.0, 1.0e-8, 4, 36, 25, 1
     ),
     "extensive": ColumnProfile(
         "extensive", 0.10, 30, 5, 5, 5, 72, 90, 5000, 6, 12, 900.0, 1.0e-9, 3, 48, 45, 2
@@ -938,13 +938,74 @@ def refine_strategy(strategy: Strategy, profile: ColumnProfile, seed: int) -> tu
     return current, history
 
 
-def exact_rank(strategies: Sequence[tuple[str, Strategy]], grid_spec: tuple[int, int, int, float]):
-    evaluator = MultiMissileEvaluator(*grid_spec)
+def exact_rank(
+    strategies: Sequence[tuple[str, Strategy]],
+    grid_spec: tuple[int, int, int, float],
+    *,
+    time_batch_size: int | None = None,
+):
+    evaluator = MultiMissileEvaluator(*grid_spec, time_batch_size=time_batch_size)
     reviewed = []
     for source, strategy in strategies:
         result = evaluator.evaluate(strategy)
         reviewed.append((source, strategy, result))
     return sorted(reviewed, key=lambda item: (-item[2].total_duration, -item[2].minimum_duration))
+
+
+def _strategy_feature(strategy: Strategy) -> np.ndarray:
+    """Normalized physical feature vector for deterministic diverse-candidate selection."""
+    plans = {plan.name: plan for plan in strategy.uavs}
+    features: list[float] = []
+    for uav_index, name in enumerate(UAV_NAMES):
+        plan = plans[name]
+        features.extend((math.sin(plan.heading), math.cos(plan.heading)))
+        features.append((plan.speed - UAV_SPEED_MIN) / (UAV_SPEED_MAX - UAV_SPEED_MIN))
+        delay_limit = max(float(FUSE_DELAY_LIMITS[uav_index]), 1.0e-12)
+        # Some historical comparison solutions contain fewer than three bombs per UAV.
+        # Keep the feature dimension fixed and make an absent bomb distinguishable from
+        # a genuine early release / zero-delay bomb.
+        for bomb_index in range(BOMBS_PER_UAV):
+            if bomb_index < len(plan.bombs):
+                bomb = plan.bombs[bomb_index]
+                features.extend((bomb.release_time / GLOBAL_HORIZON, bomb.fuse_delay / delay_limit))
+            else:
+                features.extend((-1.0, -1.0))
+    return np.asarray(features, dtype=float)
+
+
+def select_diverse_refinement_candidates(
+    reviewed: Sequence[tuple[str, Strategy, object]],
+    *,
+    count: int,
+    max_total_loss: float = 1.0,
+) -> list[tuple[str, Strategy, object]]:
+    """Pick high-quality, physically diverse representatives by greedy farthest-point clustering.
+
+    ``master_balanced`` is retained whenever it passes the quality filter.  All remaining
+    representatives maximize their nearest normalized parameter-space distance to those
+    already selected; ties prefer the stronger complete-surface result.
+    """
+    if not reviewed or count <= 0:
+        return []
+    best_total = reviewed[0][2].total_duration
+    eligible = [item for item in reviewed if item[2].positive_count == len(MISSILE_NAMES) and item[2].total_duration >= best_total - max_total_loss]
+    if not eligible:
+        return list(reviewed[: min(count, len(reviewed))])
+    balanced = next((item for item in eligible if item[0] == "master_balanced"), None)
+    selected = [balanced if balanced is not None else eligible[0]]
+    features = {item[0]: _strategy_feature(item[1]) for item in eligible}
+    while len(selected) < min(count, len(eligible)):
+        remaining = [item for item in eligible if item[0] not in {chosen[0] for chosen in selected}]
+        next_item = max(
+            remaining,
+            key=lambda item: (
+                min(float(np.linalg.norm(features[item[0]] - features[chosen[0]])) for chosen in selected),
+                item[2].total_duration,
+                item[2].minimum_duration,
+            ),
+        )
+        selected.append(next_item)
+    return selected
 
 
 def individual_durations(strategy: Strategy, evaluator: MultiMissileEvaluator):
@@ -1004,8 +1065,16 @@ def save_best_solution(path: Path, result, strategy: Strategy) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="问题五策略列生成、0-1主问题与连续精修")
     parser.add_argument("--profile", choices=tuple(PROFILES), default="standard")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Q5_DIR,
+        help="Output directory. Input libraries are always read from Q5/.",
+    )
     args = parser.parse_args()
     profile = PROFILES[args.profile]
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     print("正在建立导弹×时间单元×圆柱面片主问题网格……", flush=True)
     grid = build_master_grid(profile)
@@ -1056,7 +1125,12 @@ def main() -> None:
     medium = exact_rank(candidates, (90, 7, 7, 0.03))
     refinement_history = []
     refined_candidates = []
-    for rank, (source, strategy, result) in enumerate(medium[: profile.refinement_candidates], start=1):
+    refinement_selection = select_diverse_refinement_candidates(
+        medium,
+        count=profile.refinement_candidates,
+        max_total_loss=1.0,
+    )
+    for rank, (source, strategy, result) in enumerate(refinement_selection, start=1):
         print(
             f"正在对第{rank}个主问题组合进行逐无人机9维连续精修；"
             f"精修前{result.total_duration:.6f}s……",
@@ -1071,8 +1145,29 @@ def main() -> None:
     print("正在执行360×13×11@0.01高密度复核……", flush=True)
     high = exact_rank([(source, strategy) for source, strategy, _ in dense[:5]], (360, 13, 11, 0.01))
     print("正在执行720×21×15@0.005独立加密复核……", flush=True)
-    ultra = exact_rank([(source, strategy) for source, strategy, _ in high[:2]], (720, 21, 15, 0.005))
+    ultra = exact_rank(
+        [(source, strategy) for source, strategy, _ in high[:3]],
+        (720, 21, 15, 0.005),
+        time_batch_size=64,
+    )
     best_source, best_strategy, best_result = ultra[0]
+    print("正在对严格冠军执行1440×31×21@0.005分批交叉检查……", flush=True)
+    cross_checked = exact_rank(
+        [(best_source, best_strategy)],
+        (1440, 31, 21, 0.005),
+        time_batch_size=64,
+    )[0]
+    cross_delta = cross_checked[2].total_duration - best_result.total_duration
+    cross_reorder_required = abs(cross_delta) > 0.01
+    if abs(cross_delta) > 0.01:
+        print("  冠军加密检查差异超过0.01s，正在对严格前3名重新排序……", flush=True)
+        cross_ranked = exact_rank(
+            [(source, strategy) for source, strategy, _ in ultra],
+            (1440, 31, 21, 0.005),
+            time_batch_size=64,
+        )
+        best_source, best_strategy, best_result = cross_ranked[0]
+        cross_checked = cross_ranked[0]
     pricing_rows = [record.__dict__ for record in pricing_records]
     master_rows = [
         {
@@ -1085,6 +1180,27 @@ def main() -> None:
             "message": solution.message,
         }
         for rank, solution in enumerate((*center_solutions, balanced_solution, lower_solution, upper_solution), start=1)
+    ]
+    fairness_rows = [
+        {
+            "primary_mode": "center",
+            "primary_optimum_s": center_solutions[0].sampled_duration,
+            "time_tolerance_s": profile.time_step,
+            "required_total_s": center_solutions[0].sampled_duration - profile.time_step,
+            "balanced_total_s": balanced_solution.sampled_duration,
+            "balanced_minimum_s": balanced_solution.sampled_minimum,
+            "lexicographic_constraint_satisfied": balanced_solution.sampled_duration >= center_solutions[0].sampled_duration - profile.time_step - 1.0e-8,
+        }
+    ]
+    selection_rows = [
+        {
+            "refinement_rank": rank,
+            "source": source,
+            "medium_total_s": result.total_duration,
+            "medium_minimum_s": result.minimum_duration,
+            "selected_for_refinement": True,
+        }
+        for rank, (source, _, result) in enumerate(refinement_selection, start=1)
     ]
     convergence_rows = []
     for grid_name, reviewed in (("medium", medium), ("dense", dense), ("high", high), ("ultra", ultra)):
@@ -1102,11 +1218,28 @@ def main() -> None:
                     "grid_spec": f"{result.grid[0]}x{result.grid[1]}x{result.grid[2]}@{result.grid[3]}",
                 }
             )
-    write_csv(Q5_DIR / "q5_cg_pricing.csv", pricing_rows)
-    write_csv(Q5_DIR / "q5_cg_master_solutions.csv", master_rows)
-    write_csv(Q5_DIR / "q5_cg_refinement.csv", refinement_history)
-    write_csv(Q5_DIR / "q5_cg_convergence.csv", convergence_rows)
-    best_path = Q5_DIR / "q5_cg_best_solution.csv"
+    convergence_rows.append(
+        {
+            "grid": "cross_check",
+            "rank": 1,
+            "source": cross_checked[0],
+            "M1_s": cross_checked[2].missile_durations[0],
+            "M2_s": cross_checked[2].missile_durations[1],
+            "M3_s": cross_checked[2].missile_durations[2],
+            "total_s": cross_checked[2].total_duration,
+            "minimum_s": cross_checked[2].minimum_duration,
+            "grid_spec": f"{cross_checked[2].grid[0]}x{cross_checked[2].grid[1]}x{cross_checked[2].grid[2]}@{cross_checked[2].grid[3]}",
+            "strict_total_delta_s": cross_delta,
+            "reordered_with_cross_check": cross_reorder_required,
+        }
+    )
+    write_csv(output_dir / "q5_cg_pricing.csv", pricing_rows)
+    write_csv(output_dir / "q5_cg_master_solutions.csv", master_rows)
+    write_csv(output_dir / "q5_cg_fairness_audit.csv", fairness_rows)
+    write_csv(output_dir / "q5_cg_refinement_selection.csv", selection_rows)
+    write_csv(output_dir / "q5_cg_refinement.csv", refinement_history)
+    write_csv(output_dir / "q5_cg_convergence.csv", convergence_rows)
+    best_path = output_dir / "q5_cg_best_solution.csv"
     save_best_solution(best_path, best_result, best_strategy)
     interval_rows = [
         {
@@ -1116,7 +1249,7 @@ def main() -> None:
         }
         for index in range(3)
     ]
-    write_csv(Q5_DIR / "q5_cg_missile_intervals.csv", interval_rows)
+    write_csv(output_dir / "q5_cg_missile_intervals.csv", interval_rows)
     print("\n策略列生成与0-1主问题推荐方案")
     print(f"  来源：{best_source}")
     for index, name in enumerate(MISSILE_NAMES):
