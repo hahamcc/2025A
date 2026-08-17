@@ -1,0 +1,4 @@
+﻿init_strategy,profile,seed,elapsed_seconds,iterations,function_evaluations,success,message,search_duration_s,intervals_s
+baseline,standard,20250841,998.8400838000234,900,64872,False,Maximum number of iterations has been exceeded.,11.322563346071863,"[0.7828805464, 5.3705758589]; [9.8420901246, 13.7915896363]; [27.8153702844, 30.6007388062]"
+baseline,standard,20250842,938.9323743999703,900,64872,False,Maximum number of iterations has been exceeded.,11.252227783203132,"[1.0331540896, 5.6188901736]; [10.4304432234, 14.3956653913]; [31.3545390980, 34.0558086292]"
+baseline,standard,20250843,913.3470008999575,900,64872,False,Maximum number of iterations has been exceeded.,11.083809544540635,"[0.9763158049, 5.5635472502]; [9.9965566747, 13.9537588231]; [29.0483062122, 31.5876821629]"

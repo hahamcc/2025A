@@ -42,6 +42,7 @@ try:
         format_intervals,
         write_csv,
     )
+    from .q5_topology_seed_factory import build_topology_seed_plans
 except ImportError:
     from q5_main import (
     BOMBS_PER_UAV,
@@ -68,8 +69,9 @@ except ImportError:
     BombPlan,
     UavPlan,
     format_intervals,
-    write_csv,
+        write_csv,
     )
+    from q5_topology_seed_factory import build_topology_seed_plans
 
 
 Q5_DIR = Path(__file__).resolve().parent
@@ -386,6 +388,7 @@ def initial_columns(grid: MasterGrid) -> list[list[PlanColumn]]:
     pruned = load_pruned_plans(best_path, contribution_path)
     local = load_local_plans(Q5_DIR / "q5_local_library.csv")
     single = load_single_plans(Q5_DIR / "q5_single_library.csv")
+    topology = build_topology_seed_plans(Q5_DIR / "q5_single_library.csv")
     columns: list[list[PlanColumn]] = [[] for _ in UAV_NAMES]
     for uav_index in range(len(UAV_NAMES)):
         candidates: list[tuple[UavPlan, str]] = [(full[uav_index], "previous_best_full")]
@@ -393,6 +396,7 @@ def initial_columns(grid: MasterGrid) -> list[list[PlanColumn]]:
             candidates.append((pruned[uav_index], "previous_best_pruned"))
         candidates.extend((plan, "local_library") for plan in local[uav_index])
         candidates.extend((plan, "single_library") for plan in single[uav_index])
+        candidates.extend((item.plan, item.source) for item in topology[uav_index])
         seen: set[tuple[float, ...]] = set()
         for plan, source in candidates:
             key_values = [len(plan.bombs), plan.heading, plan.speed]
