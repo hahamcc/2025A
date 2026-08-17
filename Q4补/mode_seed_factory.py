@@ -1,9 +1,3 @@
-"""Initial-population builders for the independent Q4 mode-hybrid experiment.
-
-The categories in this module are *only* labels used to seed DE.  They never
-become constraints in the joint objective function.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

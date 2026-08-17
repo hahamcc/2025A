@@ -1,13 +1,3 @@
-"""Independent Q4 experiment: block refinement + exploratory/final DE.
-
-This program deliberately does not modify ``Q4/`` or the existing baseline.
-It uses the same 12-dimensional physical model and the same complete-cylinder
-joint objective as the baseline, but changes only the search schedule:
-
-    baseline seeds -> rand1bin exploration -> three 4-D block refinements
-    -> best1bin joint refinement -> the original multi-resolution verification.
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -1,10 +1,3 @@
-"""Physical-prior seed columns for Question 5.
-
-These plans are only used to enrich the initial column pool.  They never
-restrict the master problem: every selected plan is still evaluated against
-all three missiles by the shared complete-surface evaluator.
-"""
-
 from __future__ import annotations
 
 import csv

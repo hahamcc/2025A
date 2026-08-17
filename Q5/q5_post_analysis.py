@@ -1,8 +1,3 @@
-"""Post-process a Question 5 strategy without changing its optimization result.
-
-The script quantifies leave-one-out contributions and distinguishes ordinary
-single-cloud relay from genuinely spatial joint occlusion.
-"""
 from __future__ import annotations
 
 import argparse

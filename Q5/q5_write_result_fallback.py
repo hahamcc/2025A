@@ -1,5 +1,3 @@
-"""Dependency-free fallback for filling the official Question 5 workbook."""
-
 from __future__ import annotations
 
 import argparse

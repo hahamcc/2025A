@@ -1,5 +1,3 @@
-"""Independent Q4 experiment: classified seeds + LHS + one joint DE objective."""
-
 from __future__ import annotations
 
 import argparse

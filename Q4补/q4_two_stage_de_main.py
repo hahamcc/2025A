@@ -1,9 +1,3 @@
-"""Independent Q4 experiment: diverse DE exploration followed by joint refinement.
-
-The physical model, complete-cylinder criterion, and final verification grids are
-identical to the existing baseline.  Only the optimisation schedule changes.
-"""
-
 from __future__ import annotations
 
 import argparse

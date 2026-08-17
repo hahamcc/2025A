@@ -1,9 +1,3 @@
-"""Paper figures for Question 5.
-
-All displayed values are read from, or recomputed against, the final strategy
-in ``Q5/supplement``.  The script deliberately keeps visual diagnosis separate
-from the column-generation solver: it never changes the recommendation.
-"""
 from __future__ import annotations
 
 import argparse
